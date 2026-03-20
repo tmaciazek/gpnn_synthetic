@@ -23,73 +23,7 @@ import os
 import numpy as np
 import torch
 
-def sample_uniform_disk(radius: float = 1.0, center=(0.0, 0.0), *, rng=None, gen: str = "numpy", num_type=torch.float32, device: torch.device | None = None):
-    """
-    Draw n points uniformly from a 2D disk.
-
-    This is batching-consistent:
-    sampling two batches in a row gives the same result as
-    sampling one batch of the combined size, provided the same RNG
-    is used and the outputs are concatenated.
-    """
-    if gen == "numpy":
-    	if rng is None:
-        	rng = np.random.default_rng()
-    	def sampling_fn(*, size: (int, int)):
-    		assert len(size)==2 and size[1]==2, "Disk sampling only in 2D!"
-    		u = rng.uniform(0.0, 1.0, size=size)
-    		u = torch.from_numpy(u).to(device=device, dtype=num_type, non_blocking=(device.type == "cuda"))
-    		
-    		theta = 2.0 * np.pi * u[:, 0]
-    		r = radius * torch.sqrt(u[:, 1])
-    		x = center[0] + r * torch.cos(theta)
-    		y = center[1] + r * torch.sin(theta)
-    		
-    		return torch.column_stack((x, y))
-    else:
-    	if rng is None:
-    		rng = torch.Generator(device=device)
-    	def sampling_fn(*, size: (int, int)):
-    		u = torch.rand(size=size, generator=rng, device=device, dtype=num_type)
-    		
-    		theta = 2.0 * np.pi * u[:, 0]
-    		r = radius * torch.sqrt(u[:, 1])
-    		x = center[0] + r * torch.cos(theta)
-    		y = center[1] + r * torch.sin(theta)
-    		
-    		return torch.column_stack((x, y))
-
-    return sampling_fn
-    
-def sample_gaussian(mean=0.0, std=1.0, *, rng=None, gen: str = "numpy", num_type=torch.float32, device: torch.device | None = None):
-    """
-    Draw n points uniformly from a 2D disk.
-
-    This is batching-consistent:
-    sampling two batches in a row gives the same result as
-    sampling one batch of the combined size, provided the same RNG
-    is used and the outputs are concatenated.
-    """
-    if gen == "numpy":
-    	if rng is None:
-        	rng = np.random.default_rng()
-    	def sampling_fn(*, size: (int, int)):
-        	sample = rng.normal(loc=mean, scale=std, size=size)
-        	sample = torch.from_numpy(sample).to(device=device, dtype=num_type, non_blocking=(device.type == "cuda"))
-        	return sample
-    else:
-    	if rng is None:
-    		rng = torch.Generator(device=device)
-    	def sampling_fn(*, size: (int, int)):
-    		sample = torch.randn(size=size, generator=rng, device=device, dtype=num_type)
-    		sample = sample * std
-    		sample = sample + mean
-    		return sample
-
-
-    return sampling_fn
-
-
+from utils import *
 
 def _select_device(device_arg: str) -> torch.device:
     device_arg = device_arg.lower()
@@ -102,7 +36,6 @@ def _select_device(device_arg: str) -> torch.device:
     if device_arg == "cpu":
         return torch.device("cpu")
     raise ValueError("--device must be one of: auto, cpu, gpu")
-
 
 @torch.no_grad()
 def exact_knn_stream(
@@ -219,8 +152,7 @@ def main():
     ap.add_argument("--distro", type=str, default='gaussian', help="Data distribution: gaussian|uniform_disk")
     ap.add_argument("--float_type", type=int, default=64, help="32|64")
     ap.add_argument("--q_data_size", type=int, default=10_000, help="Only used with --synthetic_query")
-    ap.add_argument("--k", type=int, required=True, help="No. of NNs")
-    ap.add_argument("--seed_query", type=int, default=43)
+    ap.add_argument("--k", type=int, default=100, help="No. of NNs")
     ap.add_argument("--seed_train", type=int, default=0)
     ap.add_argument("--batch_size", type=int, required=True)
     ap.add_argument("--num_batches", type=int, required=True)
@@ -255,25 +187,15 @@ def main():
 	'''
     if args.data_gen == "numpy":
     	rng_train = np.random.RandomState(args.seed_train)
-    	rng_q = np.random.RandomState(args.seed_query)
     else:
         rng_train = torch.Generator(device=device)
         rng_train.manual_seed(args.seed_train)
-        rng_q = torch.Generator(device=device)
-        rng_q.manual_seed(args.seed_query)
         
     if args.distro == 'gaussian':
     	sample_train = sample_gaussian(rng=rng_train, gen=args.data_gen, num_type=num_type, device=device)
-    	sample_q = sample_gaussian(rng=rng_q, gen=args.data_gen, num_type=num_type, device=device)
     else:
     	sample_train = sample_uniform_disk(rng=rng_train, gen=args.data_gen, num_type=num_type, device=device)
-    	sample_q = sample_uniform_disk(rng=rng_q, gen=args.data_gen, num_type=num_type, device=device)
-	
-    '''
-		Generate query data
-    '''
-    X_query = sample_q(size=(args.q_data_size,args.dim))
-    print(X_query)
+    	
     '''
 		Preparation for saving checkpoints
 	'''
@@ -281,8 +203,18 @@ def main():
     if args.out_prefix is not None:
     	out_prefix = args.out_prefix
     else:
-    	out_prefix = f"exactNN_{args.distro}_d{args.dim}_seed{args.seed_train}"
-
+    	out_prefix = f"{args.distro}_d{args.dim}"
+	
+    '''
+		Load query data
+    '''
+    X_query = np.load(os.path.join(args.out_dir, f"X_query_{out_prefix}.npy"))
+    X_query = torch.from_numpy(X_query).to(device=device, dtype=num_type, non_blocking=(device.type == "cuda"))
+    
+    '''
+    	Run k-NN search
+    '''
+    
     inds, dists = exact_knn_stream(
         X_query=X_query,
         train_sampling_fn=sample_train,
@@ -294,7 +226,7 @@ def main():
         train_index_offset=args.train_index_offset,
         device=device,
         out_dir = args.out_dir,
-        out_prefix = out_prefix,
+        out_prefix = f"exactNN_{out_prefix}_k{args.k}_seed{args.seed_train}",
         checkpoint_freq = args.checkpoint_freq,
         num_type = num_type
     )
