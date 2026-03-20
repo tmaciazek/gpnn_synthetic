@@ -327,9 +327,11 @@ if __name__ == "__main__":
     # --------------------------------------------------------
     # k-NN schedule
     # --------------------------------------------------------
+	#nu = min(nu, 1.)
 	p = 2*(dim*s+nu*(2*s+si-smax))/(s*(dim+2*nu))
 	m = np.ceil(np.pow(10,p)).astype(int)
 	print("No. of NNs: ", m)
+	#nu = args.nu
 	
 	nn_file_tag = (
 	f"exactNN_{args.distro}_d{dim}_k100_seed{args.seed_train}_"

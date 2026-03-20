@@ -63,61 +63,88 @@ def main():
     '''
 		NN retrieval
     '''
-    
-    all_ind_tuples = [
-    	(ind_train, ind_q)
-    	for ind_q in range(len(ind_lists))
-    	for ind_train in ind_lists[ind_q]
-    ]
-    
-    tic = time.perf_counter()
-    all_ind_tuples = np.array(sorted(all_ind_tuples), dtype=np.int64).reshape(-1, 2)
-    #all_ind_tuples = np.array( all_ind_tuples, dtype=np.int64).reshape(-1, 2)
-    toc = time.perf_counter()
-    print("Sorting pairs took " + str(toc - tic) + " seconds", flush=True)
-    
-    nn_x_lists = [[] for i in range(len(ind_lists))]
-    tot_data = 0
-    train_size = np.ceil(np.pow(10,args.log10_tot_size)).astype(int)+1e5
-    train_batch_size = min(train_size, 10**6)
-    train_batches = np.ceil(train_size / train_batch_size).astype(int)
-    
-    for n_batch in range(train_batches):
-    	print("train_batches, n_batch: ", train_batches, n_batch, flush=True)
-    
-    	#X = rng_x_train.normal(size=(train_batch_size, dim))
-    	X = sample_train(size=(train_batch_size, args.dim))
-    
-    	ind_min = tot_data
-    	ind_max = tot_data + train_batch_size
-    	batch_mask = (all_ind_tuples[:, 0] >= ind_min) & (
-        	all_ind_tuples[:, 0] < ind_max
-    	)
-    	print("No. of nn train indices in this batch:\t", sum(batch_mask), flush=True)
 
-    	batch_ind_tuples = all_ind_tuples[batch_mask]
-    	batch_ind_tuples[:, 0] = batch_ind_tuples[:, 0] - tot_data
-    	#if len(batch_ind_tuples)>0:
-    	#	print(min(batch_ind_tuples[:, 0]), max(batch_ind_tuples[:, 0]), flush=True)
-    	[
-        	nn_x_lists[indp[1]].append(copy.copy(X[indp[0]]))
-        	for indp in batch_ind_tuples
-    	]
-    	print(
-        	"MEM usage:\t"
-        	+ str(
-            	int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024.0**2))
-        	)
-        	+ " GB"
-    	)
-    	print("\n")
-        
-    	tot_data += train_batch_size
-    
-    assert sum([len(nn) < k for nn in nn_x_lists]) == 0, "Found non-full NN sets!"
-    nn_x_lists = [torch.row_stack(nn) for nn in nn_x_lists]
-    nn_x_lists = torch.stack(nn_x_lists).numpy()
-    np.save("nn_sets/"+f"{args.out_prefix}_vecs.npy", nn_x_lists)
+    # ------------------------------------------------------------
+    # Build flattened mapping: (train_idx, query_idx, slot_idx)
+    # slot_idx preserves the original neighbour position 0,...,k-1
+    # ------------------------------------------------------------
+    nq, k = ind_lists.shape
+
+    train_idx = ind_lists.reshape(-1).astype(np.int64, copy=False)
+    query_idx = np.repeat(np.arange(nq, dtype=np.int64), k)
+    slot_idx  = np.tile(np.arange(k, dtype=np.int64), nq)
+
+    order = np.argsort(train_idx, kind="stable")
+    train_idx = train_idx[order]
+    query_idx = query_idx[order]
+    slot_idx = slot_idx[order]
+
+    train_size = int(np.ceil(10 ** args.log10_tot_size) + 100_000)
+    train_batch_size = min(train_size, 10**6)
+    train_batches = int(np.ceil(train_size / train_batch_size))
+
+    nn_x = None
+    tot_data = 0
+
+    for n_batch in range(train_batches):
+        print("train_batches, n_batch:", train_batches, n_batch, flush=True)
+
+        curr_bs = min(train_batch_size, train_size - tot_data)
+        if curr_bs <= 0:
+            break
+
+        X = sample_train(size=(curr_bs, args.dim))
+
+        ind_min = tot_data
+        ind_max = tot_data + curr_bs
+
+        # Since train_idx is sorted, find the relevant slice in O(log(nq*k))
+        lo = np.searchsorted(train_idx, ind_min, side="left")
+        hi = np.searchsorted(train_idx, ind_max, side="left")
+
+        print("No. of nn train indices in this batch:\t", hi - lo, flush=True)
+
+        if lo < hi:
+            local_idx = train_idx[lo:hi] - ind_min
+            q_idx = query_idx[lo:hi]
+            s_idx = slot_idx[lo:hi]
+
+            # fetch repeated train rows only once within the batch
+            uniq_local, inv = np.unique(local_idx, return_inverse=True)
+
+            if torch.is_tensor(X):
+                uniq_local_t = torch.from_numpy(uniq_local).long().to(X.device)
+                rows = X.index_select(0, uniq_local_t)
+
+                if nn_x is None:
+                    nn_x = torch.empty((nq, k, X.shape[1]), dtype=X.dtype, device=X.device)
+
+                q_t = torch.from_numpy(q_idx).long().to(X.device)
+                s_t = torch.from_numpy(s_idx).long().to(X.device)
+                inv_t = torch.from_numpy(inv).long().to(X.device)
+
+                nn_x[q_t, s_t] = rows.index_select(0, inv_t)
+
+            else:
+                rows = X[uniq_local]
+
+                if nn_x is None:
+                    nn_x = np.empty((nq, k, X.shape[1]), dtype=X.dtype)
+
+                nn_x[q_idx, s_idx] = rows[inv]
+
+        print(
+            "MEM usage:\t"
+            + str(int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024.0**2)))
+            + " GB"
+        )
+        print()
+
+        tot_data += curr_bs
+
+
+    assert nn_x.shape[:2] == (nq, k)
+    np.save(os.path.join(args.out_dir, f"{args.out_prefix}_vecs.npy"), nn_x)
     print(f"Saved {args.out_prefix}_vecs")
     
     
