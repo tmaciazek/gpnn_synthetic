@@ -25,9 +25,13 @@ def main():
     ap.add_argument("--distro", type=str, default='gaussian', help="Data distribution: gaussian|uniform_disk")
     ap.add_argument("--dim", type=int, required=True)
     ap.add_argument("--seed_train", type=int, default=0)
-    ap.add_argument("--log10_tot_size", type=int, required=True)
     ap.add_argument("--out_dir", type=str, default="nn_sets")
-    ap.add_argument("--out_prefix", type=str, default=None)
+    '''
+    Data size configuration
+    '''
+    ap.add_argument("--log10N_step", type=int, required=True)
+    ap.add_argument("--current_step", type=int, required=True)
+	
     args = ap.parse_args()
     
     '''
@@ -37,6 +41,9 @@ def main():
     	"--distro must be one of gaussian|uniform_disk")
     
     device = _select_device('cpu')
+    
+    s = args.log10N_step
+    si = args.current_step
     
     '''
     	RNG setup
@@ -49,8 +56,11 @@ def main():
     else:
     	sample_train = sample_uniform_disk(rng=rng_train, device=device)
     	print("Sampling from uniform_disk distro.")
+    	
+    out_prefix = (f"exactNN_{args.distro}_d{args.dim}_k100_seed{args.seed_train}"
+    f"_N1e{si}div{s}")
 
-    ind_lists = np.load(os.path.join(args.out_dir, f"{args.out_prefix}_inds.npy"))
+    ind_lists = np.load(os.path.join(args.out_dir, f"{out_prefix}_inds.npy"))
     
     '''
     	Check for NN duplicates
@@ -78,17 +88,16 @@ def main():
     train_idx = train_idx[order]
     query_idx = query_idx[order]
     slot_idx = slot_idx[order]
-
-    train_size = int(np.ceil(10 ** args.log10_tot_size) + 100_000)
-    train_batch_size = min(train_size, 10**6)
+	
+    train_size = int(1.1 * np.ceil(np.pow(10., si/float(s))))
+    train_batch_size = min(train_size, 10**7)
     train_batches = int(np.ceil(train_size / train_batch_size))
+    print(f"Generating {train_batches} train batches...", flush=True)
 
     nn_x = None
     tot_data = 0
 
     for n_batch in range(train_batches):
-        print("train_batches, n_batch:", train_batches, n_batch, flush=True)
-
         curr_bs = min(train_batch_size, train_size - tot_data)
         if curr_bs <= 0:
             break
@@ -101,8 +110,6 @@ def main():
         # Since train_idx is sorted, find the relevant slice in O(log(nq*k))
         lo = np.searchsorted(train_idx, ind_min, side="left")
         hi = np.searchsorted(train_idx, ind_max, side="left")
-
-        print("No. of nn train indices in this batch:\t", hi - lo, flush=True)
 
         if lo < hi:
             local_idx = train_idx[lo:hi] - ind_min
@@ -132,20 +139,18 @@ def main():
                     nn_x = np.empty((nq, k, X.shape[1]), dtype=X.dtype)
 
                 nn_x[q_idx, s_idx] = rows[inv]
-
-        print(
-            "MEM usage:\t"
-            + str(int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024.0**2)))
-            + " GB"
-        )
-        print()
+                
+        if n_batch % max(int(train_batches/100),1) == 0:
+        	print("train_batches, n_batch:", train_batches, n_batch+1, flush=True)
+        	print("No. of nn train indices in this batch:\t", hi - lo, flush=True)
+        	print()
 
         tot_data += curr_bs
 
 
     assert nn_x.shape[:2] == (nq, k)
-    np.save(os.path.join(args.out_dir, f"{args.out_prefix}_vecs.npy"), nn_x)
-    print(f"Saved {args.out_prefix}_vecs")
+    np.save(os.path.join(args.out_dir, f"{out_prefix}_vecs.npy"), nn_x)
+    print(f"Saved {out_prefix}_vecs.npy")
     
     
 if __name__ == "__main__":

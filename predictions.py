@@ -6,9 +6,9 @@ import argparse
 from utils import *
 
 # ============================================================
-# CHUNKED BATCHED GENERATION OF TRAINING RESPONSES
+# CHUNKED BATCHED GENERATION OF NNGP TRAINING RESPONSES
 # ============================================================
-def simulate_local_gp_responses_chunked(
+def simulate_local_nngp_responses(
     X_test,
     X_train_local,
     *,
@@ -122,9 +122,9 @@ def simulate_local_gp_responses_chunked(
     return f_test_true, y_train
 
 # ============================================================
-# CHUNKED BATCHED GP PREDICTION WITH FIXED HYPERPARAMETERS
+# CHUNKED BATCHED NNGP PREDICTION WITH FIXED HYPERPARAMETERS
 # ============================================================
-def predict_local_gp_chunked(
+def predict_local_nngp(
     X_test,
     X_train_local,
     y_train,
@@ -215,63 +215,266 @@ def predict_local_gp_chunked(
         mu_pred[start:stop] = mu_chunk
 
     return mu_pred, var_pred
-
+    
 # ============================================================
+# CHUNKED BATCHED GENERATION OF GPnn TRAINING RESPONSES
+# ============================================================
+def simulate_local_gpnn_responses(
+    X_test,
+    X_train_local,
+    *,
+    sigma_xi2,
+    chunk_size=512,
+    rng=None,
+):
+    """
+    For each test point i, compute
+        f(X_test[i])
+    and local noisy training responses
+        y_train[i, j] = f(X_train_local[i, j]) + eps_{i,j},
+    where eps_{i,j} are i.i.d. N(0, sigma_xi2).
+
+    This is chunked over test points to control RAM usage.
+
+    Parameters
+    ----------
+    X_test : ndarray, shape (n_test, d)
+    X_train_local : ndarray, shape (n_test, m, d)
+    k_gen_spec : dict
+        Unused; kept for interface compatibility.
+    sigma_xi2 : float
+        Observation-noise variance.
+    chunk_size : int
+        Number of test points processed at once.
+    rng : np.random.Generator or None
+    jitter : float
+        Unused; kept for interface compatibility.
+
+    Returns
+    -------
+    f_test_true : ndarray, shape (n_test,)
+        Deterministic function values at the test points.
+    y_train : ndarray, shape (n_test, m)
+        Noisy training responses.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    X_test = np.asarray(X_test, dtype=np.float64)
+    X_train_local = np.asarray(X_train_local, dtype=np.float64)
+
+    n_test, d = X_test.shape
+    n_test2, m, d2 = X_train_local.shape
+
+    if n_test2 != n_test or d2 != d:
+        raise ValueError("Shape mismatch between X_test and X_train_local")
+    if sigma_xi2 < 0:
+        raise ValueError("sigma_xi2 must be nonnegative")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    f_test_true = np.empty(n_test, dtype=np.float64)
+    y_train = np.empty((n_test, m), dtype=np.float64)
+
+    noise_std = np.sqrt(sigma_xi2)
+
+    for start in range(0, n_test, chunk_size):
+        stop = min(start + chunk_size, n_test)
+        b = stop - start
+
+        X_test_chunk = X_test[start:stop]         # (b, d)
+        X_train_chunk = X_train_local[start:stop] # (b, m, d)
+
+        # Deterministic test values
+        f_test_chunk = f_bounded_lipschitz(X_test_chunk)   # (b,)
+
+        # Deterministic local train values
+        X_train_flat = X_train_chunk.reshape(b * m, d)     # (b*m, d)
+        f_train_flat = f_bounded_lipschitz(X_train_flat)   # (b*m,)
+        f_train_chunk = f_train_flat.reshape(b, m)         # (b, m)
+
+        # Add i.i.d. Gaussian noise only to training responses
+        eps_chunk = noise_std * rng.standard_normal(size=(b, m))
+        y_train_chunk = f_train_chunk + eps_chunk
+
+        f_test_true[start:stop] = f_test_chunk
+        y_train[start:stop] = y_train_chunk
+
+    return f_test_true, y_train
+    
+# ============================================================
+# CHUNKED BATCHED GPnn PREDICTION WITH FIXED HYPERPARAMETERS
+# ============================================================
+def predict_local_gpnn(
+    X_test,
+    X_train_local,
+    y_train,
+    *,
+    k_pred_spec,
+    sigma_xi2_hat,
+    return_var = False,
+    chunk_size=512,
+    jitter=1e-10,
+):
+    """
+    Computes the local GP posterior at each test point in chunks.
+
+    No hyperparameter tuning is performed at all:
+    the prediction is computed directly from the fixed kernel parameters
+    in k_pred_spec and the fixed noise variance sigma_xi2_hat.
+
+    Returns
+    -------
+    mu_pred : (n_test,)
+    var_pred : (n_test,)
+    """
+    X_test = np.asarray(X_test, dtype=np.float64)
+    X_train_local = np.asarray(X_train_local, dtype=np.float64)
+    y_train = np.asarray(y_train, dtype=np.float64)
+
+    n_test, d = X_test.shape
+    n_test2, m, d2 = X_train_local.shape
+
+    if n_test2 != n_test or d2 != d:
+        raise ValueError("Shape mismatch between X_test and X_train_local")
+    if y_train.shape != (n_test, m):
+        raise ValueError("y_train must have shape (n_test, m)")
+    if sigma_xi2_hat < 0:
+        raise ValueError("sigma_xi2_hat must be nonnegative")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    mu_pred = np.empty(n_test, dtype=np.float64)
+    var_pred = np.empty(n_test, dtype=np.float64)
+
+    eye_m = np.eye(m, dtype=np.float64)
+
+    for start in range(0, n_test, chunk_size):
+        stop = min(start + chunk_size, n_test)
+
+        X_test_chunk = X_test[start:stop]                 # (b, d)
+        X_train_chunk = X_train_local[start:stop]         # (b, m, d)
+        y_chunk = y_train[start:stop]                     # (b, m)
+        b = stop - start
+
+        X_star = X_test_chunk[:, None, :]                 # (b, 1, d)
+
+        K = kernel_batched(X_train_chunk, X_train_chunk, k_pred_spec)
+        K = K + (sigma_xi2_hat + jitter) * eye_m[None, :, :]  # (b, m, m)
+
+        k_star = kernel_batched(X_train_chunk, X_star, k_pred_spec)  # (b, m, 1)
+        c_star = kernel_diag_batched(X_star, k_pred_spec)[:, 0]      # (b,)
+
+        L = np.linalg.cholesky(K)
+
+        alpha = cholesky_solve_batched(L, y_chunk[..., None])         # (b, m, 1)
+        mu_chunk = np.sum(k_star[:, :, 0] * alpha[:, :, 0], axis=1)
+        
+        if return_var:
+        	v = cholesky_solve_batched(L, k_star)                         # (b, m, 1)
+        	var_chunk = c_star - np.sum(k_star[:, :, 0] * v[:, :, 0], axis=1)
+        	var_chunk = np.maximum(var_chunk, 0.0)
+        	var_pred[start:stop] = var_chunk
+
+        mu_pred[start:stop] = mu_chunk
+
+    return mu_pred, var_pred
+    
 # FULL EXPERIMENT PIPELINE
 # ============================================================
-def run_experiment(X_test, X_train_local, nu=0.5, sigma_f2_hat=1., ell_hat = 1.5, sigma_xi2_hat = 0.2, b1_hat=0.5, b2_hat=0.5, return_var=False, rng_seed=None, chunk_size=512):
+def run_experiment(
+    mode, 
+    X_test, 
+    X_train_local, 
+    nu=0.5, 
+    sigma_f2=1., 
+    ell=1., 
+    sigma_xi2=0.1, 
+    sigma_f2_hat=1., 
+    ell_hat=1., 
+    sigma_xi2_hat=0.1, 
+    b1_hat=1., 
+    b2_hat=1., 
+    return_var=False, 
+    rng_seed=None, 
+    chunk_size=512
+    ):
     rng = np.random.default_rng(rng_seed)
-
-    # --------------------------------------------------------
-    # Generative kernel k_gen
-    # --------------------------------------------------------
-    sigma_f2 = 1.
-    ell = 1.
-    sigma_xi2 = 0.1 # 0.1
-
-    k_gen, k_gen_spec = make_kernel(
-        kind="Matern",   # or "RBF"
-        sigma_f2=sigma_f2,
-        ell=ell,
-        nu=nu,
-    )
-
-    # --------------------------------------------------------
-    # Generate latent GP values and noisy local responses
-    # --------------------------------------------------------
-    f_test_true, y_train = simulate_local_gp_responses_chunked(
-        X_test,
-        X_train_local,
-        k_gen_spec=k_gen_spec,
-        sigma_xi2=sigma_xi2,
-        chunk_size=chunk_size,
-        rng=rng,
-    )
 
     # --------------------------------------------------------
     # Prediction kernel k
     # --------------------------------------------------------
     k_pred, k_pred_spec = make_kernel(
-        kind="Matern",      # can differ from k_gen
+        kind="Matern",     
         sigma_f2=sigma_f2_hat,
         ell=ell_hat,
         nu=nu,
     )
+    
+    # --------------------------------------------------------
+    # Generative kernel k_gen
+    # --------------------------------------------------------
+    
+    if mode == "NNGP":
+    	k_gen, k_gen_spec = make_kernel(
+        	kind="Matern",   # or "RBF"
+        	sigma_f2=sigma_f2,
+        	ell=ell,
+        	nu=nu,
+        )
 
-    # --------------------------------------------------------
-    # Predict with fixed hyperparameters
-    # --------------------------------------------------------
-    mu_pred, var_pred = predict_local_gp_chunked(
-        X_test,
-        X_train_local,
-        y_train,
-        k_pred_spec=k_pred_spec,
-        sigma_xi2_hat=sigma_xi2_hat,
-        b1_hat = b1_hat,
-        b2_hat = b2_hat,
-        chunk_size=chunk_size,
-        return_var=return_var,
-    )
+        # --------------------------------------------------------
+        # Generate latent NNGP values and noisy local responses
+        # --------------------------------------------------------
+    	f_test_true, y_train = simulate_local_nngp_responses(
+            X_test,
+            X_train_local,
+            k_gen_spec=k_gen_spec,
+            sigma_xi2=sigma_xi2,
+            chunk_size=chunk_size,
+            rng=rng,
+    	)
+
+
+        # --------------------------------------------------------
+        # Predict with fixed hyperparameters
+        # --------------------------------------------------------
+    	mu_pred, var_pred = predict_local_nngp(
+            X_test,
+            X_train_local,
+            y_train,
+            k_pred_spec=k_pred_spec,
+            sigma_xi2_hat=sigma_xi2_hat,
+            b1_hat = b1_hat,
+            b2_hat = b2_hat,
+            chunk_size=chunk_size,
+            return_var=return_var,
+    	)
+    else:
+        # --------------------------------------------------------
+        # Generate latent GPnn values and noisy local responses
+        # --------------------------------------------------------
+        f_test_true, y_train = simulate_local_gpnn_responses(
+            X_test,
+            X_train_local,
+            sigma_xi2=sigma_xi2,
+            chunk_size=chunk_size,
+            rng=rng,
+    	)
+
+
+        # --------------------------------------------------------
+        # Predict with fixed hyperparameters
+        # --------------------------------------------------------
+        mu_pred, var_pred = predict_local_gpnn(
+            X_test,
+            X_train_local,
+            y_train,
+            k_pred_spec=k_pred_spec,
+            sigma_xi2_hat=sigma_xi2_hat,
+            chunk_size=chunk_size,
+            return_var=return_var,
+        )
 
     mse_vs_latent = np.mean((mu_pred - f_test_true) ** 2)
 
@@ -283,9 +486,7 @@ def run_experiment(X_test, X_train_local, nu=0.5, sigma_f2_hat=1., ell_hat = 1.5
         "mu_pred": mu_pred,
         "var_pred": var_pred,
         "mse_vs_latent": mse_vs_latent,
-        "k_gen": k_gen,
         "k_pred": k_pred,
-        "k_gen_spec": k_gen_spec,
         "k_pred_spec": k_pred_spec,
     }
 
@@ -297,6 +498,14 @@ if __name__ == "__main__":
 	ap.add_argument("--dim", type=int, required=True)
 	ap.add_argument("--seed_train", type=int, default=0)
 	ap.add_argument("--nu", type=float, default=0.5)
+	ap.add_argument("--ell", type=float, default=1.)
+	ap.add_argument("--sf2", type=float, default=1.)
+	ap.add_argument("--sxi2", type=float, default=0.1)
+	ap.add_argument("--b1_hat", type=float, default=0.5)
+	ap.add_argument("--b2_hat", type=float, default=0.5)
+	ap.add_argument("--ell_hat", type=float, default=1.5)
+	ap.add_argument("--sf2_hat", type=float, default=1.5)
+	ap.add_argument("--sxi2_hat", type=float, default=0.2)
 	'''
     Data size configuration
     '''
@@ -341,8 +550,6 @@ if __name__ == "__main__":
 	f"X_query_{args.distro}_d{dim}"
 	)
 	print("Loading: ", nn_file_tag)
-	
-	chunk_size = 2048
     
     
     # ------------------------------------------------------------
@@ -364,20 +571,70 @@ if __name__ == "__main__":
     
 	
 	# --------------------------------------------------------
-    # Run predictions
+    # Run predictions + calibration
     # --------------------------------------------------------
-
-	results = run_experiment(
-		X_test, 
-		X_train_local,
-		nu = nu, 
+	n_cal = 2000
+	X_cal = X_test[-n_cal:]
+	X_cal_local = X_train_local[-n_cal:]
+	X_test = X_test[:-n_cal]
+	X_train_local = X_train_local[:-n_cal]
+	print(f"Running calibration and predictions on {len(X_cal)}:{len(X_test)} CAL:TEST split...")
+	
+	chunk_size = 2048
+	
+	rng_xi = np.random.default_rng(seed=125)
+	
+	# calibration on the CAL-split
+	results_cal = run_experiment(
+		mode = args.mode,
+		X_test = X_cal, 
+		X_train_local = X_cal_local,
+		nu = nu,
+		ell = args.ell,
+		sigma_f2=args.sf2,
+		sigma_xi2=args.sxi2,
+		ell_hat = args.ell_hat,
+		b1_hat = args.b1_hat,
+		b2_hat = args.b2_hat,
+		sigma_f2_hat=args.sf2_hat,
+		sigma_xi2_hat=args.sxi2_hat,
 		rng_seed = 123, 
-		chunk_size=chunk_size
+		chunk_size=chunk_size,
+		return_var=True
 		)
+	y_cal = results_cal["f_test_true"] + np.sqrt(0.1) * rng_xi.normal(size=results_cal["f_test_true"].shape)
+	alpha = np.mean((y_cal - results_cal["mu_pred"])**2/results_cal["var_pred"])
+	nll0  = np.mean(np.log(results_cal["var_pred"]) + alpha + np.log(2.*np.pi))/2.
+	print("CAL, NLL before calibration: ", alpha, nll0)
+	
+	# predictions using the calibrated
+	# sigma_f2_hat, sigma_xi2_hat
+	
+	results = run_experiment(
+		mode = args.mode,
+		X_test = X_test, 
+		X_train_local = X_train_local,
+		nu = nu,
+		ell = args.ell,
+		sigma_f2=args.sf2,
+		sigma_xi2=args.sxi2,
+		ell_hat = args.ell_hat,
+		b1_hat = args.b1_hat,
+		b2_hat = args.b2_hat,
+		sigma_f2_hat=args.sf2_hat * alpha,
+		sigma_xi2_hat=args.sxi2_hat * alpha,
+		rng_seed = 124, 
+		chunk_size=chunk_size,
+		return_var=True
+		)
+	y_test = results["f_test_true"] + np.sqrt(0.1) * rng_xi.normal(size=results["f_test_true"].shape)
+	cal = np.mean((y_test - results["mu_pred"])**2/results["var_pred"])
+	nll  = np.mean(np.log(results["var_pred"]) + cal + np.log(2.*np.pi))/2.
+	print("CAL, NLL after calibtation: ", cal, nll)
 	print("mse_vs_latent =", results["mse_vs_latent"])
-
+	
 	out_tag = (
-    	f"NNGP_{args.distro}_d{dim}_seed{args.seed_train}_"
+    	f"{args.mode}_{args.distro}_d{dim}_seed{args.seed_train}_"
 		f"N1e{si}div{s}_nu{nu}"
 	)
 	
@@ -387,4 +644,7 @@ if __name__ == "__main__":
 		out_dir = "NNGP_results"
 	os.makedirs(out_dir, exist_ok=True)
 	np.save(os.path.join(out_dir, f"{out_tag}_mse.npy"), results["mse_vs_latent"])
+	np.save(os.path.join(out_dir, f"{out_tag}_cal.npy"), [[alpha,nll0],[cal,nll]])
 	print("Saved to ", os.path.join(out_dir, f"{out_tag}_mse.npy"))
+	
+	
