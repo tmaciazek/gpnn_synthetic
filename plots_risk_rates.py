@@ -15,10 +15,13 @@ ap.add_argument("--dims", nargs="+", type=int, default=[2])
 ap.add_argument("--seeds", nargs="+", type=int, default=[0])
 ap.add_argument("--nus", nargs="+", type=float, default=[0.5])
 args = ap.parse_args()
+
+plots_dir = f"{args.mode}_plots"
+os.makedirs(plots_dir, exist_ok=True)
 	
 
 seeds = args.seeds
-#mode = "GPnn"
+print(seeds)
 if args.mode == "NNGP":
 	distro = "uniform_disk"
 	s_iter = range(13, 25, 1)
@@ -44,12 +47,12 @@ for par, par_txt in zip(pars, pars_txt):
 			if args.mode == "NNGP":
 				out_tag = (
     				f"{args.mode}_{distro}_d{dim}_seed{seed_train}_"
-    				f"N1e{si}div{s}_nu{par}_mse"
+    				f"N1e{si}div{s}_nu{par}_risk"
 				)
 			else:
 				out_tag = (
     				f"{args.mode}_{distro}_d{par}_seed{seed_train}_"
-    				f"N1e{si}div{s}_nu{nu}_mse"
+    				f"N1e{si}div{s}_nu{nu}_risk"
 				)
 	
 			mse += np.load(os.path.join(out_dir, f"{out_tag}.npy"))
@@ -67,8 +70,8 @@ for par, par_txt in zip(pars, pars_txt):
 		print("Theory:", 2 * par/(dim+2 * par))
 	
 		# R^2
-		ss_res = np.sum((log_mse_list[-8:] - p(logN_list)[-8:])**2)
-		ss_tot = np.sum((log_mse_list[-8:] - np.mean(log_mse_list[-8:]))**2)
+		ss_res = np.sum((log_mse_list[-10:] - p(logN_list)[-10:])**2)
+		ss_tot = np.sum((log_mse_list[-10:] - np.mean(log_mse_list[-10:]))**2)
 		r2 = 1 - ss_res / ss_tot
 
 		print("R2: ", r2)
@@ -96,4 +99,4 @@ plt.legend(fontsize=15)
 ax = plt.gca()
 ax.set_box_aspect(2/3)
 plt.tight_layout()
-plt.show()
+plt.savefig(os.path.join(plots_dir, f"{args.mode}_risk_rates.pdf"))

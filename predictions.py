@@ -16,7 +16,7 @@ def simulate_local_nngp_responses(
     sigma_xi2,
     chunk_size=512,
     rng=None,
-    jitter=1e-10,
+    jitter=1e-8,
 ):
     """
     For each test point i, sample jointly
@@ -493,7 +493,7 @@ def run_experiment(
 
 if __name__ == "__main__":
 	ap = argparse.ArgumentParser()
-	ap.add_argument("--mode", type=str, default='GPnn', help="Regression mode: GPnn|NNGP")
+	ap.add_argument("--mode", type=str, default='NNGP', help="Regression mode: GPnn|NNGP")
 	ap.add_argument("--distro", type=str, default='gaussian', help="Data distribution: gaussian|uniform_disk")
 	ap.add_argument("--dim", type=int, required=True)
 	ap.add_argument("--seed_train", type=int, default=0)
@@ -504,8 +504,14 @@ if __name__ == "__main__":
 	ap.add_argument("--b1_hat", type=float, default=0.5)
 	ap.add_argument("--b2_hat", type=float, default=0.5)
 	ap.add_argument("--ell_hat", type=float, default=1.5)
-	ap.add_argument("--sf2_hat", type=float, default=1.5)
-	ap.add_argument("--sxi2_hat", type=float, default=0.2)
+	ap.add_argument("--sf2_hat", type=float, default=2.0)
+	ap.add_argument("--sxi2_hat", type=float, default=0.15)
+	'''
+	File name for risk landscape/derivatives
+	'''
+	ap.add_argument("--purpose", type=str, default="risk", help="mse|landscape|D")
+	ap.add_argument("--param_ID", type=str, default=None, help="ell|sf2|sxi2|b")
+	ap.add_argument("--param_idx", type=int, default=None)
 	'''
     Data size configuration
     '''
@@ -541,7 +547,11 @@ if __name__ == "__main__":
 	m = np.ceil(np.pow(10,p)).astype(int)
 	print("No. of NNs: ", m)
 	#nu = args.nu
-	
+    
+    # ------------------------------------------------------------
+    # Load test points and local training points from file
+    # Process the test/train points
+    # ------------------------------------------------------------
 	nn_file_tag = (
 	f"exactNN_{args.distro}_d{dim}_k100_seed{args.seed_train}_"
 	f"N1e{si}div{s}_vecs"
@@ -551,15 +561,10 @@ if __name__ == "__main__":
 	)
 	print("Loading: ", nn_file_tag)
     
-    
-    # ------------------------------------------------------------
-    # Load test points and local training points from file
-    # Process the test/train points
-    # ------------------------------------------------------------
 	X_test = np.load(os.path.join(args.nn_dir, f"{X_query_tag}.npy")) 
 	X_train_local = np.load(os.path.join(args.nn_dir, f"{nn_file_tag}.npy"))     
 	X_test = X_test / np.sqrt(dim) # normalize
-	X_train_local = X_train_local / np.sqrt(dim) # normalise
+	X_train_local = X_train_local / np.sqrt(dim) # normalize
     
     # select the m-NNs
 	nn_filtered = []
@@ -602,7 +607,7 @@ if __name__ == "__main__":
 		chunk_size=chunk_size,
 		return_var=True
 		)
-	y_cal = results_cal["f_test_true"] + np.sqrt(0.1) * rng_xi.normal(size=results_cal["f_test_true"].shape)
+	y_cal = results_cal["f_test_true"] + np.sqrt(args.sxi2) * rng_xi.normal(size=results_cal["f_test_true"].shape)
 	alpha = np.mean((y_cal - results_cal["mu_pred"])**2/results_cal["var_pred"])
 	nll0  = np.mean(np.log(results_cal["var_pred"]) + alpha + np.log(2.*np.pi))/2.
 	print("CAL, NLL before calibration: ", alpha, nll0)
@@ -627,24 +632,33 @@ if __name__ == "__main__":
 		chunk_size=chunk_size,
 		return_var=True
 		)
-	y_test = results["f_test_true"] + np.sqrt(0.1) * rng_xi.normal(size=results["f_test_true"].shape)
+	y_test = results["f_test_true"] + np.sqrt(args.sxi2) * rng_xi.normal(size=results["f_test_true"].shape)
 	cal = np.mean((y_test - results["mu_pred"])**2/results["var_pred"])
 	nll  = np.mean(np.log(results["var_pred"]) + cal + np.log(2.*np.pi))/2.
 	print("CAL, NLL after calibtation: ", cal, nll)
 	print("mse_vs_latent =", results["mse_vs_latent"])
 	
-	out_tag = (
+	'''
+	Saving results
+	'''
+	
+	out_tag0 = (
     	f"{args.mode}_{args.distro}_d{dim}_seed{args.seed_train}_"
 		f"N1e{si}div{s}_nu{nu}"
 	)
+	if args.param_ID is not None:
+		out_tag = f"{out_tag0}_{args.purpose}_{args.param_ID}_{args.param_idx}"
+	else:
+		out_tag = f"{out_tag0}_{args.purpose}"
 	
 	if args.mode == "GPnn":
 		out_dir = "GPnn_results"
 	else: 
 		out_dir = "NNGP_results"
 	os.makedirs(out_dir, exist_ok=True)
-	np.save(os.path.join(out_dir, f"{out_tag}_mse.npy"), results["mse_vs_latent"])
-	np.save(os.path.join(out_dir, f"{out_tag}_cal.npy"), [[alpha,nll0],[cal,nll]])
-	print("Saved to ", os.path.join(out_dir, f"{out_tag}_mse.npy"))
+	np.save(os.path.join(out_dir, f"{out_tag}.npy"), results["mse_vs_latent"])
+	if args.purpose=="risk":
+		np.save(os.path.join(out_dir, f"{out_tag0}_cal.npy"), [[alpha,nll0],[cal,nll]])
+	print("Saved to ", os.path.join(out_dir, f"{out_tag}"))
 	
 	
