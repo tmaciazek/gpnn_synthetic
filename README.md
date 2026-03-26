@@ -19,4 +19,4 @@ for seed in 0 1 2 3; do
     python exact_nn.py --dim 4 --q_data_size 10000 --batch_size 200000 --num_batches 2812000 --q_bs 2048 --seed_train $seed --device gpu --distro gaussian --checkpoint_freq 2
 done
 ```
-For higher dimensions, replace `--dim 4` with `--dim 8` or `--dim 16`.
+For higher dimensions, replace `--dim 4` with `--dim 8` or `--dim 16`. The runtime grows quickly with the dimension (for $d_X=16$ it took about 80 hours on NVIDIA Tesla V100).
