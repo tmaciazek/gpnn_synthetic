@@ -12,7 +12,7 @@ for seed in 0 1 2 3; do
     python exact_nn.py --dim 2 --q_data_size 10000 --batch_size 1000 --num_batches 1000 --q_bs 2048 --seed_train $seed --device cpu --distro uniform_disk --checkpoint_freq 4
 done
 ```
-To re-generate the Gaussian data used in the $GPnn$-experiments in dimension $d_X=4$, run the following commands. As opposed to the above $d_X=2$-case, the scripts below require a GPU. The `bash` for-loop can be replaced by an array-job when submitting the jobs on Slurm.
+To re-generate the Gaussian data (training data size $10^{23/2}$) used in the $GPnn$-experiments in dimension $d_X=4$, run the following commands. As opposed to the above $d_X=2$-case, the scripts below require a GPU. The `bash` for-loop can be replaced by an array-job when submitting the jobs on Slurm.
 ```
 python generate_query_data.py --dim 4 --data_size 10000  --distro gaussian
 for seed in 0 1 2 3; do
