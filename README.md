@@ -23,7 +23,7 @@ For higher dimensions, replace `--dim 4` with `--dim 8` or `--dim 16`. The runti
 
  ### 2. Retrieve the nearest-neighbour vectors.
 
-For the $NNGP$-experiment, run the following bash script.
+In this step, we retrieve nearest-neighbour vectors from their indices. For the $NNGP$-experiment, run the following bash script.
 ```
 for si in `seq 13 24`; do
     for seed in 0 1 2 3; do
