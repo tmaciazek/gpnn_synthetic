@@ -2,7 +2,7 @@
 
 This repository is the official implementation of synthetic-data experiments from [The Theory and Practice of Highly Scalable Gaussian Process Regression with Nearest Neighbours](https://arxiv.org/).
 
-In addition, this repository contains the Online Appendix 1 which displays all the proofs of the theoretical results and provides additinal information about the work.
+In addition, this repository contains the [Online Appendix 1](Online_Appendix_1.pdf) which displays all the proofs of the theoretical results and provides additinal information about the work.
 
 
  ### 1. (Optional) Sample training/test data and find nearest-neighbours.
