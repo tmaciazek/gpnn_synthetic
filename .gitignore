@@ -1,3 +1,7 @@
 .DS_Store
 test.py
 texput.log
+NNGP_plots/
+NNGP_results/
+GPnn_results/
+nn_sets_full/
